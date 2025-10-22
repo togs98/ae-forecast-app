@@ -1,10 +1,10 @@
-# app2.py — A+E Forecasting Dashboard (end-to-end)
-# Run: streamlit run app2.py
+# app3.py — A+E Forecasting Dashboard (updated)
+# See chat for change summary.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from io import BytesIO
 
 # Optional deps
 try:
@@ -29,10 +29,11 @@ ALIAS = {
     "STB VOD": "STB VOD 4+",
     "O+O": "On-Domain VOD",
 }
+
 AUTO_PROG    = ["program_key","Program - Series Name","Program","Partner Program","program"]
 AUTO_BUCKET  = ["analysis_bucket","bucket_work","bucket","dist_bucket","Platform"]
 AUTO_MINUTES = ["Program Minutes Viewed","Minutes Viewed","minutes_viewed","minutes","Total Minutes","y","MIN"]
-AUTO_TIME    = ["Display Interval","month_dt","Year and Month","Display Interval","time","Month","date"]
+AUTO_TIME    = ["Display Interval","month_dt","Year and Month","time","Month","date"]
 
 BUCKET_FROM_PLATFORM = {
     "mvpd apps & sites": "MVPD VOD",
@@ -47,6 +48,13 @@ BUCKET_FROM_PLATFORM = {
     "on-domain vod": "On-Domain VOD",
     "o+o": "On-Domain VOD",
     "o&o": "On-Domain VOD",
+
+    # NEW: common linear labels → Live+7
+    "linear tv": "Live+7",
+    "linear": "Live+7",
+    "linear l+7": "Live+7",
+    "live +7": "Live+7",
+    "live+7": "Live+7",
 }
 
 VOD_FAST_BUCKETS = ["FAST", "MVPD VOD", "vMVPD VOD", "STB VOD 4+", "On-Domain VOD"]
@@ -64,32 +72,25 @@ def _clean_minutes(s):
 def _bucket_from_any(col: pd.Series) -> pd.Series:
     x = col.astype(str).str.strip()
     low = x.str.lower()
-    # first pass: direct ALIAS map
     mapped = x.replace(ALIAS)
     out = []
-    for raw, lc in zip(x, low):
+    for raw, lc in zip(mapped, low):
         val = None
         for key, target in BUCKET_FROM_PLATFORM.items():
             if key in lc:
                 val = target
                 break
         out.append(val if val is not None else raw)
-    ser = pd.Series(out).replace(ALIAS)
-    return ser
+    return pd.Series(out).replace(ALIAS)
 
 def monthly_fill_from_raw(df_raw, prog_col, bucket_or_platform_col, time_col, minutes_col):
-    # Minutes
+    df_raw = df_raw.copy()
     df_raw[minutes_col] = _clean_minutes(df_raw[minutes_col])
-    # Month
     df_raw["ds"] = _ensure_month(df_raw[time_col])
-    # Bucket (derive from Platform or map existing)
     df_raw["bucket"] = _bucket_from_any(df_raw[bucket_or_platform_col])
-    # Program + Minutes to canonical names
     df = df_raw.rename(columns={prog_col:"program", minutes_col:"y"})[["program","bucket","ds","y"]].copy()
-    # Aggregate to monthly per (program, bucket)
     monthly = (df.groupby(["program","bucket","ds"], dropna=False)["y"]
                  .sum().reset_index().sort_values(["program","bucket","ds"]))
-    # Fill gaps per (program,bucket)
     rows = []
     for (p,b), g in monthly.groupby(["program","bucket"]):
         g = g.sort_values("ds")
@@ -98,7 +99,6 @@ def monthly_fill_from_raw(df_raw, prog_col, bucket_or_platform_col, time_col, mi
         gg["program"] = p; gg["bucket"] = b
         rows.append(gg)
     out = pd.concat(rows, ignore_index=True)
-    # final cleanup
     out["bucket"] = out["bucket"].replace(ALIAS)
     out["y"] = np.maximum(out["y"], 0.0)
     return out[["program","bucket","ds","y"]]
@@ -165,7 +165,6 @@ def gbm_forecast(y: pd.Series, horizon: int) -> pd.Series:
         n_estimators=400, learning_rate=0.03, max_depth=3, subsample=0.9, random_state=42
     )
     model.fit(X, df["y"])
-    # recursive multi-step
     hist = y.copy()
     out_idx = pd.date_range(hist.index.max() + pd.offsets.MonthBegin(1), periods=horizon, freq="MS")
     preds = []
@@ -175,21 +174,22 @@ def gbm_forecast(y: pd.Series, horizon: int) -> pd.Series:
             "month": ds_i.month,
             "quarter": (ds_i.month-1)//3 + 1,
             "year": ds_i.year,
-            "lag1": s.iloc[-1] if len(s)>=1 else np.nan,
-            "lag2": s.iloc[-2] if len(s)>=2 else np.nan,
-            "lag3": s.iloc[-3] if len(s)>=3 else np.nan,
-            "lag6": s.iloc[-6] if len(s)>=6 else np.nan,
-            "lag12": s.iloc[-12] if len(s)>=12 else np.nan,
+            "lag1": s.iloc[-1] if len(s)>=1 else 0.0,
+            "lag2": s.iloc[-2] if len(s)>=2 else 0.0,
+            "lag3": s.iloc[-3] if len(s)>=3 else 0.0,
+            "lag6": s.iloc[-6] if len(s)>=6 else 0.0,
+            "lag12": s.iloc[-12] if len(s)>=12 else 0.0,
             "roll3":  s.tail(3).mean() if len(s)>=3 else s.mean() if len(s)>0 else 0.0,
             "roll6":  s.tail(6).mean() if len(s)>=6 else s.mean() if len(s)>0 else 0.0,
             "roll12": s.tail(12).mean() if len(s)>=12 else s.mean() if len(s)>0 else 0.0,
             "diff1":  (s.iloc[-1]-s.iloc[-2]) if len(s)>=2 else 0.0,
             "diff12": (s.iloc[-1]-s.iloc[-13]) if len(s)>=13 else 0.0,
         }
-        Xi = pd.DataFrame([row]).fillna(0.0)
+        Xi = pd.DataFrame([row])
         yhat = float(model.predict(Xi)[0])
-        preds.append(max(yhat, 0.0))
-        hist.loc[ds_i] = max(yhat, 0.0)
+        yhat = max(yhat, 0.0)
+        preds.append(yhat)
+        hist.loc[ds_i] = yhat
     return pd.Series(preds, index=out_idx, name="yhat")
 
 def prophet_forecast(y: pd.Series, horizon: int) -> pd.Series:
@@ -214,7 +214,6 @@ def intercept_blend(last_actual: float, yhat: pd.Series, decay=(1.0, 0.6, 0.3)) 
 def monthly_by_bucket(df):
     out = (df.groupby(["bucket","ds"], dropna=False)["y"]
              .sum().reset_index().sort_values(["bucket","ds"]))
-    # fill gaps per bucket
     rows = []
     for b, g in out.groupby("bucket"):
         idx = pd.date_range(g["ds"].min(), g["ds"].max(), freq="MS")
@@ -257,15 +256,18 @@ def rolling_backtests_all(df, test_h=6):
                 "WAPE_%": wape(yy, pp), "sMAPE_%": smape(yy, pp), "MAPE_%": mape(yy, pp),
                 "n_points": len(test)
             })
-    bt = pd.DataFrame(results).sort_values(["bucket","WAPE_%"])
-    winners = (bt.sort_values("WAPE_%")
-                 .groupby("bucket", as_index=False).first()[["bucket","model","WAPE_%","MAPE_%","sMAPE_%","RMSE"]])
+
+    bt = pd.DataFrame(results)
+    if bt.empty:
+        winners = pd.DataFrame(columns=["bucket","model","WAPE_%","MAPE_%","sMAPE_%","RMSE"])
+    else:
+        bt = bt.sort_values(["bucket","WAPE_%"])
+        winners = (bt.sort_values("WAPE_%")
+                     .groupby("bucket", as_index=False).first()[["bucket","model","WAPE_%","MAPE_%","sMAPE_%","RMSE"]])
     return bt, winners
 
 def natural_gap(l7_hist: pd.Series, fast_hist: pd.Series,
                 fast_fc: pd.Series, pct=0.05, lookahead=24):
-    if l7_hist.empty and fast_hist.empty and fast_fc.empty:
-        return np.nan, None, None
     if l7_hist is None or len(l7_hist)==0:
         return np.nan, None, None
     t_peak = l7_hist.idxmax()
@@ -302,10 +304,7 @@ def policy_sensitivity(df, thresholds=(0.03,0.05,0.07,0.10), floor3=True):
         fa = pm[pm["bucket"]=="FAST"].set_index("ds")["y"].sort_index()
         for t in thresholds:
             g, _, _ = natural_gap(l7, fa, pd.Series(dtype=float), pct=t)
-            natural = "0M (concurrent)" if (not pd.isna(g) and int(g)<=0) else \
-                      "1M" if (not pd.isna(g) and int(g)<=2) else \
-                      "3M" if (not pd.isna(g) and int(g)<=5) else \
-                      ("6M" if not pd.isna(g) else "No FAST signal yet")
+            natural = "0M (concurrent)" if (not pd.isna(g) and int(g)<=0) else                       "1M" if (not pd.isna(g) and int(g)<=2) else                       "3M" if (not pd.isna(g) and int(g)<=5) else                       ("6M" if not pd.isna(g) else "No FAST signal yet")
             rec = "3M" if floor3 and natural in {"0M (concurrent)","1M"} else natural
             out.append({"program_key": p, "threshold": f"{int(t*100)}%",
                         "natural_gap_months": (None if pd.isna(g) else int(g)),
@@ -355,7 +354,7 @@ if df_raw is None:
     st.info("Upload your raw dataset to begin.")
     st.stop()
 
-# Auto-detect columns (with your schema)
+# Auto-detect columns
 auto_prog   = next((c for c in AUTO_PROG    if c in df_raw.columns), None) or "Program"
 auto_bucket = next((c for c in AUTO_BUCKET  if c in df_raw.columns), None) or "Platform"
 auto_min    = next((c for c in AUTO_MINUTES if c in df_raw.columns), None) or "Program Minutes Viewed"
@@ -405,7 +404,9 @@ buckets = sorted(df["bucket"].dropna().unique().tolist())
 st.sidebar.header("Selections")
 prog = st.sidebar.selectbox("Program", programs)
 bucket = st.sidebar.selectbox("Bucket", buckets)
-model_choice = st.sidebar.selectbox("Model", ["Naive-12","GBM (+calendar/lag)","Prophet (diagnostic)"])
+
+# NEW: include Auto option
+model_choice = st.sidebar.selectbox("Model", ["Auto (best by WAPE)","Naive-12","GBM (+calendar/lag)","Prophet (diagnostic)"])
 
 sub = (df[(df["program"]==prog) & (df["bucket"]==bucket)]
          .groupby("ds", as_index=False)["y"].sum()
@@ -420,10 +421,20 @@ y = sub.set_index("ds")["y"].asfreq("MS").fillna(0.0)
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Forecast", "Backtests", "Policy sensitivity", "Per-title summary", "Correlation"])
 
 with tab1:
+    # Compute winners once for Auto mode
+    bt_cache, winners = rolling_backtests_all(df)
+
+    selected_model = model_choice
+    if model_choice.startswith("Auto"):
+        if not winners.empty and bucket in set(winners["bucket"]):
+            selected_model = winners.loc[winners["bucket"]==bucket, "model"].iloc[0]
+        else:
+            selected_model = "Naive-12"  # fallback
+
     # Forecast
-    if model_choice.startswith("Naive"):
+    if selected_model.startswith("Naive"):
         fc = naive12_forecast(y, H)
-    elif model_choice.startswith("GBM"):
+    elif selected_model.startswith("GBM"):
         fc = gbm_forecast(y, H)
     else:
         fc = prophet_forecast(y, H)
@@ -439,7 +450,7 @@ with tab1:
         st.subheader(f"{prog} — {bucket}: Actuals & Forecast")
         fig, ax = plt.subplots(figsize=(9,4))
         ax.plot(y.index, y.values, label="Actual")
-        ax.plot(fc.index, fc.values, "--", label=f"Forecast ({model_choice})")
+        ax.plot(fc.index, fc.values, "--", label=f"Forecast ({selected_model})")
         ax.set_xlabel("Month"); ax.set_ylabel("Minutes")
         ax.legend(); fig.tight_layout()
         st.pyplot(fig)
@@ -459,20 +470,22 @@ with tab1:
         else:
             st.write("— (policy derives from Live+7 vs FAST)")
 
-    # export forecast
     fc_df = pd.DataFrame({"ds": fc.index, "yhat": fc.values})
     df_download_button(fc_df, f"forecast_{prog}_{bucket}.csv", "Download forecast CSV")
 
 with tab2:
     st.subheader("Rolling backtests by bucket (last 6 months holdout)")
     bt_all, winners = rolling_backtests_all(df)
-    c1, c2 = st.columns([2,1])
-    with c1:
-        st.dataframe(bt_all, use_container_width=True)
-        df_download_button(bt_all, "backtest_metrics.csv", "Download backtest metrics")
-    with c2:
-        st.markdown("**Per-bucket winners (lowest WAPE)**")
-        st.dataframe(winners, use_container_width=True)
+    if bt_all.empty:
+        st.info("Not enough history to run 6-month backtests for these buckets.")
+    else:
+        c1, c2 = st.columns([2,1])
+        with c1:
+            st.dataframe(bt_all, use_container_width=True)
+            df_download_button(bt_all, "backtest_metrics.csv", "Download backtest metrics")
+        with c2:
+            st.markdown("**Per-bucket winners (lowest WAPE)**")
+            st.dataframe(winners, use_container_width=True)
 
 with tab3:
     st.subheader("Policy threshold sensitivity (3/5/7/10%) — with optional 3M floor")
@@ -493,15 +506,11 @@ with tab4:
         vod_fast_total = totals.reindex(VOD_FAST_BUCKETS).fillna(0).sum()
         denom = live7_total + vod_fast_total
         l7_share = (live7_total / denom) if denom > 0 else np.nan
-        # natural gap @ 5% (history only)
         pm = (subp.groupby(["bucket","ds"])["y"].sum().reset_index())
         l7 = pm[pm["bucket"]=="Live+7"].set_index("ds")["y"].sort_index()
         fa = pm[pm["bucket"]=="FAST"].set_index("ds")["y"].sort_index()
         g, _, _ = natural_gap(l7, fa, pd.Series(dtype=float), pct=0.05)
-        natural = "0M (concurrent)" if (not pd.isna(g) and int(g)<=0) else \
-                  "1M" if (not pd.isna(g) and int(g)<=2) else \
-                  "3M" if (not pd.isna(g) and int(g)<=5) else \
-                  ("6M" if not pd.isna(g) else "No FAST signal yet")
+        natural = "0M (concurrent)" if (not pd.isna(g) and int(g)<=0) else                   "1M" if (not pd.isna(g) and int(g)<=2) else                   "3M" if (not pd.isna(g) and int(g)<=5) else                   ("6M" if not pd.isna(g) else "No FAST signal yet")
         policy3 = "3M" if natural in {"0M (concurrent)","1M"} else natural
         rows.append({
             "program_key": p,
@@ -523,4 +532,4 @@ with tab5:
         st.pyplot(fig)
         df_download_button(corr.reset_index(), "bucket_correlation.csv", "Download correlation")
 
-st.caption("Tip: Each git push to main will auto-redeploy on Streamlit Cloud.")
+st.caption("Tip: Set the Streamlit Cloud main file to app3.py and point to requirements.txt.")
